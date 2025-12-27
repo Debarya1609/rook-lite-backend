@@ -4,9 +4,12 @@ from uuid import uuid4
 from datetime import datetime
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
+from app.utils.json_repair import safe_json_load
 
-from app.llm.openrouter_client import call_llm
+from app.llm.openrouter_client import generate_analysis
+
+from app.utils.asset_detector import detect_asset_type
 
 # --------------------------------------------------
 # Router
@@ -14,7 +17,7 @@ from app.llm.openrouter_client import call_llm
 router = APIRouter(prefix="/analysis", tags=["Analysis"])
 
 # --------------------------------------------------
-# Storage config
+# Storage config (UNCHANGED)
 # --------------------------------------------------
 DATA_DIR = "data"
 DATA_FILE = os.path.join(DATA_DIR, "analyses.json")
@@ -24,7 +27,6 @@ os.makedirs(DATA_DIR, exist_ok=True)
 if not os.path.exists(DATA_FILE):
     with open(DATA_FILE, "w") as f:
         json.dump([], f)
-
 
 # --------------------------------------------------
 # INPUT MODELS
@@ -43,9 +45,8 @@ class AnalyzePageRequest(BaseModel):
     page_content: PageContent
     user_goal: Optional[str] = None
 
-
 # --------------------------------------------------
-# HISTORY MODELS
+# HISTORY MODELS (UNCHANGED)
 # --------------------------------------------------
 class SavedAnalysis(BaseModel):
     id: str
@@ -61,9 +62,8 @@ class HistoryItem(BaseModel):
     score: float
     created_at: str
 
-
 # --------------------------------------------------
-# UTILITIES
+# UTILITIES (UNCHANGED)
 # --------------------------------------------------
 def read_analyses() -> List[dict]:
     with open(DATA_FILE, "r") as f:
@@ -74,37 +74,37 @@ def write_analyses(data: List[dict]):
     with open(DATA_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
-
 # --------------------------------------------------
-# ANALYZE PAGE (AI)
+# ANALYZE PAGE (LEVEL-2 INTELLIGENCE)
 # --------------------------------------------------
 @router.post("/page")
 def analyze_page(data: AnalyzePageRequest):
-    prompt = f"""
-You are a senior marketing strategist and startup advisor.
+    try:
+        asset_type = detect_asset_type(data.url or "")
 
-Perform a deep, structured audit of the website.
+        prompt = f"""
+You are a senior marketing analyst advising a real business owner.
+
+Speak like a human consultant:
+- Calm
+- Honest
+- Practical
+- Slightly opinionated
+- No hype, no emojis, no generic AI tone
 
 STRICT RULES:
 - Respond ONLY with valid JSON
-- NO markdown
-- NO explanations outside JSON
-- Follow the schema EXACTLY
-- Scores must be out of 10 (allow 1 decimal)
+- No markdown
+- No explanations outside JSON
+- Follow the schema exactly
 
-JSON SCHEMA:
-{{
-  "what_this_site_is": "string",
-  "target_audience": "string",
-  "strengths": ["string"],
-  "weaknesses": ["string"],
-  "improvements": ["string"],
-  "seo_metadata_feedback": "string",
-  "social_presence_analysis": "string",
-  "marketing_verdict": "string",
-  "investor_verdict": "string",
-  "overall_score": number
-}}
+ASSET TYPE:
+{asset_type}
+
+ANALYSIS MINDSET:
+- First understand what this asset is and who it is for
+- Then analyze it based on how this platform actually works
+- Adapt SEO, CTA, and conversion logic to the platform
 
 INPUT DATA:
 URL: {data.url}
@@ -116,39 +116,65 @@ CTAs: {data.page_content.cta_texts}
 SOCIAL LINKS: {data.page_content.social_links}
 
 USER GOAL:
-{data.user_goal if data.user_goal else "Infer the primary business goal."}
+{data.user_goal if data.user_goal else "Infer the primary business or growth goal."}
+
+OUTPUT JSON SCHEMA:
+{{
+  "asset_type": "string",
+  "overview": "string",
+  "target_audience": "string",
+  "sections": [
+    {{
+      "id": "string",
+      "title": "string",
+      "insights": ["string"]
+    }}
+  ],
+  "verdicts": {{
+    "marketing": "string",
+    "strategic": "string"
+  }},
+  "score": {{
+    "value": number,
+    "reasoning": "string"
+  }}
+}}
+
+SCORING RULES:
+- Score out of 10 (1 decimal)
+- Base score on clarity, trust, positioning, and conversion readiness
+- Avoid inflated scores
 """
 
-    raw_response = call_llm(prompt)
-
-    try:
-        analysis = json.loads(raw_response)
-
-        score = float(analysis.get("overall_score", 0))
-        analysis["overall_score"] = round(min(max(score, 0), 10), 1)
+        raw_response = generate_analysis(prompt)
+        analysis = safe_json_load(raw_response)
+        # Safety clamp for score
+        score_val = float(analysis.get("score", {}).get("value", 0))
+        analysis["score"]["value"] = round(min(max(score_val, 0), 10), 1)
 
         return analysis
 
-    except Exception:
+    except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail="AI response was invalid or improperly formatted"
+            detail=f"Analysis failed or AI response invalid: {str(e)}"
         )
-
 
 # --------------------------------------------------
 # SAVE ANALYSIS (HISTORY)
 # --------------------------------------------------
 @router.post("/save")
-def save_analysis(payload: dict):
+def save_analysis(payload: Dict[str, Any]):
     try:
         analyses = read_analyses()
+
+        score_val = float(payload.get("analysis", {}).get("score", {}).get("value", 0))
 
         new_entry = SavedAnalysis(
             id=str(uuid4()),
             url=payload.get("url"),
             analysis=payload.get("analysis"),
-            score=float(payload.get("analysis", {}).get("overall_score", 0)),
+            score=score_val,
             created_at=datetime.utcnow().isoformat()
         )
 
@@ -162,7 +188,6 @@ def save_analysis(payload: dict):
             status_code=500,
             detail=f"Failed to save analysis: {str(e)}"
         )
-
 
 # --------------------------------------------------
 # GET HISTORY LIST
@@ -180,7 +205,6 @@ def get_history():
         )
         for a in reversed(analyses)
     ]
-
 
 # --------------------------------------------------
 # GET SINGLE HISTORY ITEM
